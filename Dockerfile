@@ -13,6 +13,11 @@ RUN sed -i 's/localhost/miner/' /usr/src/sx1302_hal/packet_forwarder/global_conf
 
 FROM ${RUNNER_IMAGE} as runner
 
+RUN apt-get update && \
+    apt-get install -y gpiod && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /opt/packet_forwarder
 
 COPY --from=builder /usr/src/sx1302_hal/packet_forwarder/lora_pkt_fwd /opt/packet_forwarder/
