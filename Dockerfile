@@ -1,5 +1,5 @@
-ARG BUILDER_IMAGE=debian:12-slim
-ARG RUNNER_IMAGE=debian:12-slim
+ARG BUILDER_IMAGE=debian:13-slim
+ARG RUNNER_IMAGE=debian:13-slim
 FROM ${BUILDER_IMAGE} as builder
 
 RUN apt update && apt -y upgrade && apt install -y build-essential linux-libc-dev jq
