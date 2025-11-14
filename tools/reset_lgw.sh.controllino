@@ -19,33 +19,18 @@ reset() {
     echo "CoreCell power enable through GPIO$SX1302_POWER_EN_PIN..."
 
     # write output for SX1302 CoreCell power_enable and reset
-    gpioset --mode=signal -b gpiochip0 $SX1302_POWER_EN_PIN=1
+    gpioset -z -t 0 -c 0 $SX1302_POWER_EN_PIN=1
 
-    gpioset --mode=time --usec=100 gpiochip0 $SX1302_RESET_PIN=1
-    gpioset --mode=time --usec=100 gpiochip0 $SX1302_RESET_PIN=0
-}
-
-term() {
-    # cleanup all GPIOs
-    if [ -d /sys/class/gpio/gpio$SX1302_RESET_PIN ]
-    then
-        echo "$SX1302_RESET_PIN" > /sys/class/gpio/unexport; WAIT_GPIO
-    fi
-    if [ -d /sys/class/gpio/gpio$SX1302_POWER_EN_PIN ]
-    then
-        echo "$SX1302_POWER_EN_PIN" > /sys/class/gpio/unexport; WAIT_GPIO
-    fi
+    gpioset --hold-period 100us -t 0 -c 0 $SX1302_RESET_PIN=1
+    gpioset --hold-period 100us -t 0 -c 0 $SX1302_RESET_PIN=0
 }
 
 case "$1" in
     start)
-    term # just in case
-    init
     reset
     ;;
     stop)
     reset
-    term
     ;;
     *)
     echo "Usage: $0 {start|stop}"
