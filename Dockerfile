@@ -16,7 +16,8 @@ FROM ${RUNNER_IMAGE} as runner
 RUN apt-get update && \
     apt-get install -y gpiod && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /opt/packet_forwarder/configs
 
 WORKDIR /opt/packet_forwarder
 
