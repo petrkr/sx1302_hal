@@ -50,6 +50,7 @@ License: Revised BSD License, see LICENSE.TXT file include in the project
 #include <sys/ioctl.h>
 
 #include <pthread.h>
+#include <microhttpd.h>
 
 #include "trace.h"
 #include "jitqueue.h"
@@ -229,6 +230,12 @@ static uint8_t beacon_infodesc = DEFAULT_BEACON_INFODESC; /* set beacon informat
 /* auto-quit function */
 static uint32_t autoquit_threshold = 0; /* enable auto-quit after a number of non-acknowledged PULL_DATA (0 = disabled)*/
 
+/* Prometheus metrics configuration */
+static bool prometheus_enabled = false; /* enable Prometheus HTTP metrics endpoint */
+static char prometheus_listen_addr[64] = "0.0.0.0"; /* Prometheus HTTP bind address */
+static uint16_t prometheus_port = 9100; /* Prometheus HTTP port */
+static struct MHD_Daemon *prometheus_daemon = NULL; /* Prometheus HTTP server daemon */
+
 /* Just In Time TX scheduling */
 static struct jit_queue_s jit_queue[LGW_RF_CHAIN_NB];
 
@@ -281,6 +288,7 @@ void thread_jit(void);
 void thread_gps_tty(void);
 void thread_gps_i2c(void);
 void thread_valid(void);
+void thread_prometheus(void);
 
 /* -------------------------------------------------------------------------- */
 /* --- PRIVATE FUNCTIONS DEFINITION ----------------------------------------- */
@@ -964,6 +972,28 @@ static int parse_gateway_configuration(const char * conf_file) {
         MSG("INFO: Auto-quit after %u non-acknowledged PULL_DATA\n", autoquit_threshold);
     }
 
+    /* Prometheus metrics endpoint configuration (optional) */
+    val = json_object_get_value(conf_obj, "prometheus_enabled");
+    if (json_value_get_type(val) == JSONBoolean) {
+        prometheus_enabled = (bool)json_value_get_boolean(val);
+        if (prometheus_enabled == true) {
+            MSG("INFO: Prometheus metrics endpoint is enabled\n");
+        } else {
+            MSG("INFO: Prometheus metrics endpoint is disabled\n");
+        }
+    }
+    str = json_object_get_string(conf_obj, "prometheus_listen_addr");
+    if (str != NULL) {
+        strncpy(prometheus_listen_addr, str, sizeof prometheus_listen_addr);
+        prometheus_listen_addr[sizeof prometheus_listen_addr - 1] = '\0'; /* ensure string termination */
+        MSG("INFO: Prometheus listen address is configured to \"%s\"\n", prometheus_listen_addr);
+    }
+    val = json_object_get_value(conf_obj, "prometheus_port");
+    if (val != NULL) {
+        prometheus_port = (uint16_t)json_value_get_number(val);
+        MSG("INFO: Prometheus port is configured to %u\n", prometheus_port);
+    }
+
     /* free JSON parsing data structure */
     json_value_free(root_val);
     return 0;
@@ -1203,6 +1233,7 @@ int main(int argc, char ** argv)
     pthread_t thrid_gps;
     pthread_t thrid_valid;
     pthread_t thrid_jit;
+    pthread_t thrid_prometheus;
 
     /* network socket creation */
     struct addrinfo hints;
@@ -1466,6 +1497,15 @@ int main(int argc, char ** argv)
         }
     }
 
+    /* spawn thread to manage Prometheus metrics (optional) */
+    if (prometheus_enabled) {
+        i = pthread_create( &thrid_prometheus, NULL, (void * (*)(void *))thread_prometheus, NULL);
+        if (i != 0) {
+            MSG("WARNING: [main] impossible to create prometheus thread, metrics disabled\n");
+            prometheus_enabled = false;
+        }
+    }
+
     /* configure signal handling */
     sigemptyset(&sigact.sa_mask);
     sigact.sa_flags = 0;
@@ -1660,6 +1700,9 @@ int main(int argc, char ** argv)
         } else {
             MSG("WARNING: failed to close GPS successfully\n");
         }
+    }
+    if (prometheus_enabled) {
+        pthread_cancel(thrid_prometheus); /* don't wait for prometheus thread */
     }
 
     /* if an exit signal was received, try to quit properly */
@@ -3443,6 +3486,259 @@ void thread_valid(void) {
         // printf("Time ref: %s, XTAL correct: %s (%.15lf)\n", ref_valid_local?"valid":"invalid", xtal_correct_ok?"valid":"invalid", xtal_correct); // DEBUG
     }
     MSG("\nINFO: End of validation thread\n");
+}
+
+/* -------------------------------------------------------------------------- */
+/* --- THREAD 7: PROMETHEUS METRICS EXPORTER -------------------------------- */
+
+/* Prometheus metrics HTTP request handler */
+static enum MHD_Result prometheus_metrics_handler(void *cls, struct MHD_Connection *connection,
+                                                   const char *url, const char *method,
+                                                   const char *version, const char *upload_data,
+                                                   size_t *upload_data_size, void **con_cls) {
+    struct MHD_Response *response;
+    enum MHD_Result ret;
+    char metrics_buffer[8192];
+    int buf_idx = 0;
+
+    /* only handle GET requests */
+    if (strcmp(method, "GET") != 0) {
+        return MHD_NO;
+    }
+
+    /* only handle /metrics endpoint */
+    if (strcmp(url, "/metrics") != 0) {
+        const char *not_found = "404 Not Found\n";
+        response = MHD_create_response_from_buffer(strlen(not_found), (void *)not_found, MHD_RESPMEM_PERSISTENT);
+        ret = MHD_queue_response(connection, MHD_HTTP_NOT_FOUND, response);
+        MHD_destroy_response(response);
+        return ret;
+    }
+
+    /* snapshot metrics from global variables with mutex protection */
+    uint32_t snap_nb_rx_rcv, snap_nb_rx_ok, snap_nb_rx_bad, snap_nb_rx_nocrc;
+    uint32_t snap_up_pkt_fwd, snap_up_network_byte, snap_up_payload_byte;
+    uint32_t snap_up_dgram_sent, snap_up_ack_rcv;
+
+    pthread_mutex_lock(&mx_meas_up);
+    snap_nb_rx_rcv = meas_nb_rx_rcv;
+    snap_nb_rx_ok = meas_nb_rx_ok;
+    snap_nb_rx_bad = meas_nb_rx_bad;
+    snap_nb_rx_nocrc = meas_nb_rx_nocrc;
+    snap_up_pkt_fwd = meas_up_pkt_fwd;
+    snap_up_network_byte = meas_up_network_byte;
+    snap_up_payload_byte = meas_up_payload_byte;
+    snap_up_dgram_sent = meas_up_dgram_sent;
+    snap_up_ack_rcv = meas_up_ack_rcv;
+    pthread_mutex_unlock(&mx_meas_up);
+
+    uint32_t snap_dw_pull_sent, snap_dw_ack_rcv, snap_dw_dgram_rcv;
+    uint32_t snap_dw_network_byte, snap_dw_payload_byte;
+    uint32_t snap_nb_tx_ok, snap_nb_tx_fail, snap_nb_tx_requested;
+    uint32_t snap_nb_tx_rejected_collision_packet, snap_nb_tx_rejected_collision_beacon;
+    uint32_t snap_nb_tx_rejected_too_late, snap_nb_tx_rejected_too_early;
+    uint32_t snap_nb_beacon_queued, snap_nb_beacon_sent, snap_nb_beacon_rejected;
+
+    pthread_mutex_lock(&mx_meas_dw);
+    snap_dw_pull_sent = meas_dw_pull_sent;
+    snap_dw_ack_rcv = meas_dw_ack_rcv;
+    snap_dw_dgram_rcv = meas_dw_dgram_rcv;
+    snap_dw_network_byte = meas_dw_network_byte;
+    snap_dw_payload_byte = meas_dw_payload_byte;
+    snap_nb_tx_ok = meas_nb_tx_ok;
+    snap_nb_tx_fail = meas_nb_tx_fail;
+    snap_nb_tx_requested = meas_nb_tx_requested;
+    snap_nb_tx_rejected_collision_packet = meas_nb_tx_rejected_collision_packet;
+    snap_nb_tx_rejected_collision_beacon = meas_nb_tx_rejected_collision_beacon;
+    snap_nb_tx_rejected_too_late = meas_nb_tx_rejected_too_late;
+    snap_nb_tx_rejected_too_early = meas_nb_tx_rejected_too_early;
+    snap_nb_beacon_queued = meas_nb_beacon_queued;
+    snap_nb_beacon_sent = meas_nb_beacon_sent;
+    snap_nb_beacon_rejected = meas_nb_beacon_rejected;
+    pthread_mutex_unlock(&mx_meas_dw);
+
+    bool snap_gps_coord_valid;
+    struct coord_s snap_meas_gps_coord;
+
+    pthread_mutex_lock(&mx_meas_gps);
+    snap_gps_coord_valid = gps_coord_valid;
+    snap_meas_gps_coord = meas_gps_coord;
+    pthread_mutex_unlock(&mx_meas_gps);
+
+    /* get temperature from concentrator (no mutex needed, single read operation) */
+    float temperature = 0.0;
+    int ret_temp;
+    pthread_mutex_lock(&mx_concent);
+    ret_temp = lgw_get_temperature(&temperature);
+    pthread_mutex_unlock(&mx_concent);
+
+    /* generate Prometheus format metrics */
+    buf_idx = 0;
+
+    /* upstream metrics */
+    buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
+        "# HELP lora_packets_received_total Total number of packets received by the concentrator\n"
+        "# TYPE lora_packets_received_total counter\n"
+        "lora_packets_received_total{status=\"ok\"} %u\n"
+        "lora_packets_received_total{status=\"crc_bad\"} %u\n"
+        "lora_packets_received_total{status=\"no_crc\"} %u\n",
+        snap_nb_rx_ok, snap_nb_rx_bad, snap_nb_rx_nocrc);
+
+    buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
+        "# HELP lora_packets_forwarded_total Total number of packets forwarded to the server\n"
+        "# TYPE lora_packets_forwarded_total counter\n"
+        "lora_packets_forwarded_total %u\n",
+        snap_up_pkt_fwd);
+
+    buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
+        "# HELP lora_upstream_bytes_total Total number of bytes sent upstream\n"
+        "# TYPE lora_upstream_bytes_total counter\n"
+        "lora_upstream_bytes_total{type=\"network\"} %u\n"
+        "lora_upstream_bytes_total{type=\"payload\"} %u\n",
+        snap_up_network_byte, snap_up_payload_byte);
+
+    buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
+        "# HELP lora_upstream_datagrams_total Total number of upstream datagrams\n"
+        "# TYPE lora_upstream_datagrams_total counter\n"
+        "lora_upstream_datagrams_total{type=\"sent\"} %u\n"
+        "lora_upstream_datagrams_total{type=\"ack\"} %u\n",
+        snap_up_dgram_sent, snap_up_ack_rcv);
+
+    /* downstream metrics */
+    buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
+        "# HELP lora_downstream_pull_requests_total Total number of PULL_DATA requests\n"
+        "# TYPE lora_downstream_pull_requests_total counter\n"
+        "lora_downstream_pull_requests_total{type=\"sent\"} %u\n"
+        "lora_downstream_pull_requests_total{type=\"ack\"} %u\n",
+        snap_dw_pull_sent, snap_dw_ack_rcv);
+
+    buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
+        "# HELP lora_downstream_datagrams_received_total Total number of downstream datagrams received\n"
+        "# TYPE lora_downstream_datagrams_received_total counter\n"
+        "lora_downstream_datagrams_received_total %u\n",
+        snap_dw_dgram_rcv);
+
+    buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
+        "# HELP lora_downstream_bytes_total Total number of bytes received downstream\n"
+        "# TYPE lora_downstream_bytes_total counter\n"
+        "lora_downstream_bytes_total{type=\"network\"} %u\n"
+        "lora_downstream_bytes_total{type=\"payload\"} %u\n",
+        snap_dw_network_byte, snap_dw_payload_byte);
+
+    /* transmission metrics */
+    buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
+        "# HELP lora_transmit_total Total number of transmission events\n"
+        "# TYPE lora_transmit_total counter\n"
+        "lora_transmit_total{status=\"ok\"} %u\n"
+        "lora_transmit_total{status=\"fail\"} %u\n"
+        "lora_transmit_total{status=\"requested\"} %u\n",
+        snap_nb_tx_ok, snap_nb_tx_fail, snap_nb_tx_requested);
+
+    buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
+        "# HELP lora_transmit_rejected_total Total number of rejected transmissions by reason\n"
+        "# TYPE lora_transmit_rejected_total counter\n"
+        "lora_transmit_rejected_total{reason=\"collision_packet\"} %u\n"
+        "lora_transmit_rejected_total{reason=\"collision_beacon\"} %u\n"
+        "lora_transmit_rejected_total{reason=\"too_late\"} %u\n"
+        "lora_transmit_rejected_total{reason=\"too_early\"} %u\n",
+        snap_nb_tx_rejected_collision_packet, snap_nb_tx_rejected_collision_beacon,
+        snap_nb_tx_rejected_too_late, snap_nb_tx_rejected_too_early);
+
+    /* beacon metrics */
+    buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
+        "# HELP lora_beacon_total Total number of beacon events\n"
+        "# TYPE lora_beacon_total counter\n"
+        "lora_beacon_total{status=\"queued\"} %u\n"
+        "lora_beacon_total{status=\"sent\"} %u\n"
+        "lora_beacon_total{status=\"rejected\"} %u\n",
+        snap_nb_beacon_queued, snap_nb_beacon_sent, snap_nb_beacon_rejected);
+
+    /* temperature */
+    if (ret_temp == LGW_HAL_SUCCESS) {
+        buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
+            "# HELP lora_concentrator_temperature_celsius Concentrator temperature in Celsius\n"
+            "# TYPE lora_concentrator_temperature_celsius gauge\n"
+            "lora_concentrator_temperature_celsius %.1f\n",
+            temperature);
+    }
+
+    /* GPS metrics */
+    if (snap_gps_coord_valid) {
+        buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
+            "# HELP lora_gps_latitude GPS latitude in degrees\n"
+            "# TYPE lora_gps_latitude gauge\n"
+            "lora_gps_latitude %.6f\n"
+            "# HELP lora_gps_longitude GPS longitude in degrees\n"
+            "# TYPE lora_gps_longitude gauge\n"
+            "lora_gps_longitude %.6f\n"
+            "# HELP lora_gps_altitude_meters GPS altitude in meters\n"
+            "# TYPE lora_gps_altitude_meters gauge\n"
+            "lora_gps_altitude_meters %d\n",
+            snap_meas_gps_coord.lat, snap_meas_gps_coord.lon, snap_meas_gps_coord.alt);
+    }
+
+    /* create response and send */
+    response = MHD_create_response_from_buffer(buf_idx, (void *)metrics_buffer, MHD_RESPMEM_MUST_COPY);
+    MHD_add_response_header(response, "Content-Type", "text/plain; version=0.0.4");
+    ret = MHD_queue_response(connection, MHD_HTTP_OK, response);
+    MHD_destroy_response(response);
+
+    return ret;
+}
+
+void thread_prometheus(void) {
+    struct sockaddr_in addr;
+    sigset_t sigmask;
+
+    MSG("INFO: [prometheus] thread activated\n");
+
+    /* block all signals for this thread to prevent interference with main application */
+    sigfillset(&sigmask);
+    pthread_sigmask(SIG_BLOCK, &sigmask, NULL);
+
+    /* configure bind address */
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(prometheus_port);
+    if (inet_pton(AF_INET, prometheus_listen_addr, &addr.sin_addr) != 1) {
+        MSG("ERROR: [prometheus] invalid listen address \"%s\"\n", prometheus_listen_addr);
+        return;
+    }
+
+    /* start HTTP daemon */
+    prometheus_daemon = MHD_start_daemon(
+        MHD_USE_THREAD_PER_CONNECTION | MHD_USE_INTERNAL_POLLING_THREAD,
+        prometheus_port,
+        NULL, NULL,
+        &prometheus_metrics_handler, NULL,
+        MHD_OPTION_SOCK_ADDR, (struct sockaddr *)&addr,
+        MHD_OPTION_CONNECTION_LIMIT, (unsigned int)10,
+        MHD_OPTION_CONNECTION_TIMEOUT, (unsigned int)30,
+        MHD_OPTION_END
+    );
+
+    if (prometheus_daemon == NULL) {
+        MSG("ERROR: [prometheus] failed to start HTTP server on %s:%u\n",
+            prometheus_listen_addr, prometheus_port);
+        return;
+    }
+
+    MSG("INFO: [prometheus] HTTP server started on %s:%u\n",
+        prometheus_listen_addr, prometheus_port);
+
+    /* event loop - wait for exit signal */
+    while (!exit_sig && !quit_sig) {
+        wait_ms(1000);
+    }
+
+    /* cleanup */
+    if (prometheus_daemon != NULL) {
+        MHD_stop_daemon(prometheus_daemon);
+        prometheus_daemon = NULL;
+        MSG("INFO: [prometheus] HTTP server stopped\n");
+    }
+
+    MSG("INFO: End of Prometheus thread\n");
 }
 
 /* --- EOF ------------------------------------------------------------------ */
