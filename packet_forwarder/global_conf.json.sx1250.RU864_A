@@ -109,7 +109,10 @@
         /* forward only valid packets */
         "forward_crc_valid": true,
         "forward_crc_error": false,
-        "forward_crc_disabled": false
+        "forward_crc_disabled": false,
+        "prometheus_enabled": true,
+        "prometheus_listen_addr": "127.0.0.1",
+        "prometheus_port": 9100
     },
 
     "debug_conf": {
