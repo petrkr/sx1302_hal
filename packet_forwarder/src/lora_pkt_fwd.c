@@ -3301,7 +3301,7 @@ void thread_gps_i2c(void) {
 
         /* Prevent buffer overflow */
         if ((sizeof(read_buf) - wr_idx) < LGW_GPS_MIN_MSG_SIZE) {
-            memcpy(read_buf, &read_buf[LGW_GPS_MIN_MSG_SIZE], wr_idx - LGW_GPS_MIN_MSG_SIZE);
+            memmove(read_buf, &read_buf[LGW_GPS_MIN_MSG_SIZE], wr_idx - LGW_GPS_MIN_MSG_SIZE);
             wr_idx -= LGW_GPS_MIN_MSG_SIZE;
         }
     }
@@ -3397,7 +3397,7 @@ void thread_gps_tty(void) {
 
         /* Prevent buffer overflow */
         if ((sizeof(serial_buff) - wr_idx) < LGW_GPS_MIN_MSG_SIZE) {
-            memcpy(serial_buff, &serial_buff[LGW_GPS_MIN_MSG_SIZE], wr_idx - LGW_GPS_MIN_MSG_SIZE);
+            memmove(serial_buff, &serial_buff[LGW_GPS_MIN_MSG_SIZE], wr_idx - LGW_GPS_MIN_MSG_SIZE);
             wr_idx -= LGW_GPS_MIN_MSG_SIZE;
         }
     }
