@@ -2,7 +2,7 @@ ARG BUILDER_IMAGE=debian:13-slim
 ARG RUNNER_IMAGE=debian:13-slim
 FROM ${BUILDER_IMAGE} as builder
 
-RUN apt update && apt -y upgrade && apt install -y build-essential linux-libc-dev jq
+RUN apt update && apt -y upgrade && apt install -y build-essential linux-libc-dev jq libmicrohttpd-dev
 
 WORKDIR /usr/src/sx1302_hal
 
@@ -14,7 +14,7 @@ RUN sed -i 's/localhost/miner/' /usr/src/sx1302_hal/packet_forwarder/global_conf
 FROM ${RUNNER_IMAGE} as runner
 
 RUN apt-get update && \
-    apt-get install -y gpiod && \
+    apt-get install -y gpiod libmicrohttpd12 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
     mkdir -p /opt/packet_forwarder/configs
