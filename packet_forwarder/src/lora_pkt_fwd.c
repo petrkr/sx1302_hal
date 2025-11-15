@@ -3565,12 +3565,23 @@ static enum MHD_Result prometheus_metrics_handler(void *cls, struct MHD_Connecti
     snap_meas_gps_coord = meas_gps_coord;
     pthread_mutex_unlock(&mx_meas_gps);
 
-    /* get temperature from concentrator (no mutex needed, single read operation) */
+    /* get temperature and hardware counters from concentrator */
     float temperature = 0.0;
     int ret_temp;
+    uint32_t inst_cnt = 0;
+    uint32_t pps_cnt = 0;
     pthread_mutex_lock(&mx_concent);
     ret_temp = lgw_get_temperature(&temperature);
+    lgw_get_instcnt(&inst_cnt);
+    lgw_get_trigcnt(&pps_cnt);
     pthread_mutex_unlock(&mx_concent);
+
+    /* suppress unused parameter warnings - these are required by MHD callback signature */
+    (void)cls;
+    (void)version;
+    (void)upload_data;
+    (void)upload_data_size;
+    (void)con_cls;
 
     /* generate Prometheus format metrics */
     buf_idx = 0;
@@ -3579,10 +3590,11 @@ static enum MHD_Result prometheus_metrics_handler(void *cls, struct MHD_Connecti
     buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
         "# HELP lora_packets_received_total Total number of packets received by the concentrator\n"
         "# TYPE lora_packets_received_total counter\n"
+        "lora_packets_received_total{status=\"all\"} %u\n"
         "lora_packets_received_total{status=\"ok\"} %u\n"
         "lora_packets_received_total{status=\"crc_bad\"} %u\n"
         "lora_packets_received_total{status=\"no_crc\"} %u\n",
-        snap_nb_rx_ok, snap_nb_rx_bad, snap_nb_rx_nocrc);
+        snap_nb_rx_rcv, snap_nb_rx_ok, snap_nb_rx_bad, snap_nb_rx_nocrc);
 
     buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
         "# HELP lora_packets_forwarded_total Total number of packets forwarded to the server\n"
@@ -3653,7 +3665,7 @@ static enum MHD_Result prometheus_metrics_handler(void *cls, struct MHD_Connecti
         "lora_beacon_total{status=\"rejected\"} %u\n",
         snap_nb_beacon_queued, snap_nb_beacon_sent, snap_nb_beacon_rejected);
 
-    /* temperature */
+    /* hardware status */
     if (ret_temp == LGW_HAL_SUCCESS) {
         buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
             "# HELP lora_concentrator_temperature_celsius Concentrator temperature in Celsius\n"
@@ -3661,6 +3673,15 @@ static enum MHD_Result prometheus_metrics_handler(void *cls, struct MHD_Connecti
             "lora_concentrator_temperature_celsius %.1f\n",
             temperature);
     }
+
+    buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
+        "# HELP lora_sx1302_counter_inst SX1302 internal timestamp counter (microseconds)\n"
+        "# TYPE lora_sx1302_counter_inst counter\n"
+        "lora_sx1302_counter_inst %u\n"
+        "# HELP lora_sx1302_counter_pps SX1302 PPS/trigger counter (microseconds)\n"
+        "# TYPE lora_sx1302_counter_pps counter\n"
+        "lora_sx1302_counter_pps %u\n",
+        inst_cnt, pps_cnt);
 
     /* GPS metrics */
     if (snap_gps_coord_valid) {
