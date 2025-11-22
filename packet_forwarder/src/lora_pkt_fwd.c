@@ -213,6 +213,32 @@ static pthread_mutex_t mx_meas_gps = PTHREAD_MUTEX_INITIALIZER; /* control acces
 static bool gps_coord_valid; /* could we get valid GPS coordinates ? */
 static struct coord_s meas_gps_coord; /* GPS position of the gateway */
 
+/* Prometheus cumulative counters (never reset, for proper counter semantics) */
+static uint64_t prom_nb_rx_rcv = 0;
+static uint64_t prom_nb_rx_ok = 0;
+static uint64_t prom_nb_rx_bad = 0;
+static uint64_t prom_nb_rx_nocrc = 0;
+static uint64_t prom_up_pkt_fwd = 0;
+static uint64_t prom_up_network_byte = 0;
+static uint64_t prom_up_payload_byte = 0;
+static uint64_t prom_up_dgram_sent = 0;
+static uint64_t prom_up_ack_rcv = 0;
+static uint64_t prom_dw_pull_sent = 0;
+static uint64_t prom_dw_ack_rcv = 0;
+static uint64_t prom_dw_dgram_rcv = 0;
+static uint64_t prom_dw_network_byte = 0;
+static uint64_t prom_dw_payload_byte = 0;
+static uint64_t prom_nb_tx_ok = 0;
+static uint64_t prom_nb_tx_fail = 0;
+static uint64_t prom_nb_tx_requested = 0;
+static uint64_t prom_nb_tx_rejected_collision_packet = 0;
+static uint64_t prom_nb_tx_rejected_collision_beacon = 0;
+static uint64_t prom_nb_tx_rejected_too_late = 0;
+static uint64_t prom_nb_tx_rejected_too_early = 0;
+static uint64_t prom_nb_beacon_queued = 0;
+static uint64_t prom_nb_beacon_sent = 0;
+static uint64_t prom_nb_beacon_rejected = 0;
+
 static pthread_mutex_t mx_stat_rep = PTHREAD_MUTEX_INITIALIZER; /* control access to the status report */
 static bool report_ready = false; /* true when there is a new report to send to the server */
 static char status_report[STATUS_SIZE]; /* status report as a JSON object */
@@ -1139,6 +1165,7 @@ static int send_tx_ack(uint8_t token_h, uint8_t token_l, enum jit_error_e error,
             /* update stats */
             pthread_mutex_lock(&mx_meas_dw);
             meas_nb_tx_rejected_collision_packet += 1;
+            prom_nb_tx_rejected_collision_packet += 1;
             pthread_mutex_unlock(&mx_meas_dw);
             break;
         case JIT_ERROR_TOO_LATE:
@@ -1147,6 +1174,7 @@ static int send_tx_ack(uint8_t token_h, uint8_t token_l, enum jit_error_e error,
             /* update stats */
             pthread_mutex_lock(&mx_meas_dw);
             meas_nb_tx_rejected_too_late += 1;
+            prom_nb_tx_rejected_too_late += 1;
             pthread_mutex_unlock(&mx_meas_dw);
             break;
         case JIT_ERROR_TOO_EARLY:
@@ -1155,6 +1183,7 @@ static int send_tx_ack(uint8_t token_h, uint8_t token_l, enum jit_error_e error,
             /* update stats */
             pthread_mutex_lock(&mx_meas_dw);
             meas_nb_tx_rejected_too_early += 1;
+            prom_nb_tx_rejected_too_early += 1;
             pthread_mutex_unlock(&mx_meas_dw);
             break;
         case JIT_ERROR_COLLISION_BEACON:
@@ -1163,6 +1192,7 @@ static int send_tx_ack(uint8_t token_h, uint8_t token_l, enum jit_error_e error,
             /* update stats */
             pthread_mutex_lock(&mx_meas_dw);
             meas_nb_tx_rejected_collision_beacon += 1;
+            prom_nb_tx_rejected_collision_beacon += 1;
             pthread_mutex_unlock(&mx_meas_dw);
             break;
         case JIT_ERROR_TX_FREQ:
@@ -1856,9 +1886,11 @@ void thread_up(void) {
             /* basic packet filtering */
             pthread_mutex_lock(&mx_meas_up);
             meas_nb_rx_rcv += 1;
+            prom_nb_rx_rcv += 1;
             switch(p->status) {
                 case STAT_CRC_OK:
                     meas_nb_rx_ok += 1;
+                    prom_nb_rx_ok += 1;
                     if (!fwd_valid_pkt) {
                         pthread_mutex_unlock(&mx_meas_up);
                         continue; /* skip that packet */
@@ -1866,6 +1898,7 @@ void thread_up(void) {
                     break;
                 case STAT_CRC_BAD:
                     meas_nb_rx_bad += 1;
+                    prom_nb_rx_bad += 1;
                     if (!fwd_error_pkt) {
                         pthread_mutex_unlock(&mx_meas_up);
                         continue; /* skip that packet */
@@ -1873,6 +1906,7 @@ void thread_up(void) {
                     break;
                 case STAT_NO_CRC:
                     meas_nb_rx_nocrc += 1;
+                    prom_nb_rx_nocrc += 1;
                     if (!fwd_nocrc_pkt) {
                         pthread_mutex_unlock(&mx_meas_up);
                         continue; /* skip that packet */
@@ -1886,6 +1920,8 @@ void thread_up(void) {
             }
             meas_up_pkt_fwd += 1;
             meas_up_payload_byte += p->size;
+            prom_up_pkt_fwd += 1;
+            prom_up_payload_byte += p->size;
             pthread_mutex_unlock(&mx_meas_up);
             printf( "\nINFO: Received pkt from mote: %08X (fcnt=%u)\n", mote_addr, mote_fcnt );
 
@@ -2228,6 +2264,8 @@ void thread_up(void) {
         pthread_mutex_lock(&mx_meas_up);
         meas_up_dgram_sent += 1;
         meas_up_network_byte += buff_index;
+        prom_up_dgram_sent += 1;
+        prom_up_network_byte += buff_index;
 
         /* wait for acknowledge (in 2 times, to catch extra packets) */
         for (i=0; i<2; ++i) {
@@ -2248,6 +2286,7 @@ void thread_up(void) {
             } else {
                 MSG("INFO: [up] PUSH_ACK received in %i ms\n", (int)(1000 * difftimespec(recv_time, send_time)));
                 meas_up_ack_rcv += 1;
+                prom_up_ack_rcv += 1;
                 break;
             }
         }
@@ -2493,6 +2532,7 @@ void thread_down(void) {
         clock_gettime(CLOCK_MONOTONIC, &send_time);
         pthread_mutex_lock(&mx_meas_dw);
         meas_dw_pull_sent += 1;
+        prom_dw_pull_sent += 1;
         pthread_mutex_unlock(&mx_meas_dw);
         req_ack = false;
         autoquit_cnt++;
@@ -2576,6 +2616,7 @@ void thread_down(void) {
                         /* update stats */
                         pthread_mutex_lock(&mx_meas_dw);
                         meas_nb_beacon_queued += 1;
+                        prom_nb_beacon_queued += 1;
                         pthread_mutex_unlock(&mx_meas_dw);
 
                         /* One more beacon in the queue */
@@ -2596,6 +2637,7 @@ void thread_down(void) {
                         pthread_mutex_lock(&mx_meas_dw);
                         if (jit_result != JIT_ERROR_COLLISION_BEACON) {
                             meas_nb_beacon_rejected += 1;
+                            prom_nb_beacon_rejected += 1;
                         }
                         pthread_mutex_unlock(&mx_meas_dw);
                         /* In case previous enqueue failed, we retry one period later until it succeeds */
@@ -2633,6 +2675,7 @@ void thread_down(void) {
                         autoquit_cnt = 0;
                         pthread_mutex_lock(&mx_meas_dw);
                         meas_dw_ack_rcv += 1;
+                        prom_dw_ack_rcv += 1;
                         pthread_mutex_unlock(&mx_meas_dw);
                         MSG("INFO: [down] PULL_ACK received in %i ms\n", (int)(1000 * difftimespec(recv_time, send_time)));
                     }
@@ -2926,6 +2969,9 @@ void thread_down(void) {
             meas_dw_dgram_rcv += 1; /* count only datagrams with no JSON errors */
             meas_dw_network_byte += msg_len; /* meas_dw_network_byte */
             meas_dw_payload_byte += txpkt.size;
+            prom_dw_dgram_rcv += 1;
+            prom_dw_network_byte += msg_len;
+            prom_dw_payload_byte += txpkt.size;
             pthread_mutex_unlock(&mx_meas_dw);
 
             /* reset error/warning results */
@@ -2964,6 +3010,7 @@ void thread_down(void) {
                 }
                 pthread_mutex_lock(&mx_meas_dw);
                 meas_nb_tx_requested += 1;
+                prom_nb_tx_requested += 1;
                 pthread_mutex_unlock(&mx_meas_dw);
             }
 
@@ -3032,6 +3079,7 @@ void thread_jit(void) {
                             /* Update statistics */
                             pthread_mutex_lock(&mx_meas_dw);
                             meas_nb_beacon_sent += 1;
+                            prom_nb_beacon_sent += 1;
                             pthread_mutex_unlock(&mx_meas_dw);
                             MSG("INFO: Beacon dequeued (count_us=%u)\n", pkt.count_us);
                         }
@@ -3062,12 +3110,14 @@ void thread_jit(void) {
                         if (result == LGW_HAL_ERROR) {
                             pthread_mutex_lock(&mx_meas_dw);
                             meas_nb_tx_fail += 1;
+                            prom_nb_tx_fail += 1;
                             pthread_mutex_unlock(&mx_meas_dw);
                             MSG("WARNING: [jit] lgw_send failed on rf_chain %d\n", i);
                             continue;
                         } else {
                             pthread_mutex_lock(&mx_meas_dw);
                             meas_nb_tx_ok += 1;
+                            prom_nb_tx_ok += 1;
                             pthread_mutex_unlock(&mx_meas_dw);
                             MSG_DEBUG(DEBUG_PKT_FWD, "lgw_send done on rf_chain %d: count_us=%u\n", i, pkt.count_us);
                         }
@@ -3516,45 +3566,46 @@ static enum MHD_Result prometheus_metrics_handler(void *cls, struct MHD_Connecti
     }
 
     /* snapshot metrics from global variables with mutex protection */
-    uint32_t snap_nb_rx_rcv, snap_nb_rx_ok, snap_nb_rx_bad, snap_nb_rx_nocrc;
-    uint32_t snap_up_pkt_fwd, snap_up_network_byte, snap_up_payload_byte;
-    uint32_t snap_up_dgram_sent, snap_up_ack_rcv;
+    /* Using prom_* cumulative counters for proper Prometheus counter semantics */
+    uint64_t snap_nb_rx_rcv, snap_nb_rx_ok, snap_nb_rx_bad, snap_nb_rx_nocrc;
+    uint64_t snap_up_pkt_fwd, snap_up_network_byte, snap_up_payload_byte;
+    uint64_t snap_up_dgram_sent, snap_up_ack_rcv;
 
     pthread_mutex_lock(&mx_meas_up);
-    snap_nb_rx_rcv = meas_nb_rx_rcv;
-    snap_nb_rx_ok = meas_nb_rx_ok;
-    snap_nb_rx_bad = meas_nb_rx_bad;
-    snap_nb_rx_nocrc = meas_nb_rx_nocrc;
-    snap_up_pkt_fwd = meas_up_pkt_fwd;
-    snap_up_network_byte = meas_up_network_byte;
-    snap_up_payload_byte = meas_up_payload_byte;
-    snap_up_dgram_sent = meas_up_dgram_sent;
-    snap_up_ack_rcv = meas_up_ack_rcv;
+    snap_nb_rx_rcv = prom_nb_rx_rcv;
+    snap_nb_rx_ok = prom_nb_rx_ok;
+    snap_nb_rx_bad = prom_nb_rx_bad;
+    snap_nb_rx_nocrc = prom_nb_rx_nocrc;
+    snap_up_pkt_fwd = prom_up_pkt_fwd;
+    snap_up_network_byte = prom_up_network_byte;
+    snap_up_payload_byte = prom_up_payload_byte;
+    snap_up_dgram_sent = prom_up_dgram_sent;
+    snap_up_ack_rcv = prom_up_ack_rcv;
     pthread_mutex_unlock(&mx_meas_up);
 
-    uint32_t snap_dw_pull_sent, snap_dw_ack_rcv, snap_dw_dgram_rcv;
-    uint32_t snap_dw_network_byte, snap_dw_payload_byte;
-    uint32_t snap_nb_tx_ok, snap_nb_tx_fail, snap_nb_tx_requested;
-    uint32_t snap_nb_tx_rejected_collision_packet, snap_nb_tx_rejected_collision_beacon;
-    uint32_t snap_nb_tx_rejected_too_late, snap_nb_tx_rejected_too_early;
-    uint32_t snap_nb_beacon_queued, snap_nb_beacon_sent, snap_nb_beacon_rejected;
+    uint64_t snap_dw_pull_sent, snap_dw_ack_rcv, snap_dw_dgram_rcv;
+    uint64_t snap_dw_network_byte, snap_dw_payload_byte;
+    uint64_t snap_nb_tx_ok, snap_nb_tx_fail, snap_nb_tx_requested;
+    uint64_t snap_nb_tx_rejected_collision_packet, snap_nb_tx_rejected_collision_beacon;
+    uint64_t snap_nb_tx_rejected_too_late, snap_nb_tx_rejected_too_early;
+    uint64_t snap_nb_beacon_queued, snap_nb_beacon_sent, snap_nb_beacon_rejected;
 
     pthread_mutex_lock(&mx_meas_dw);
-    snap_dw_pull_sent = meas_dw_pull_sent;
-    snap_dw_ack_rcv = meas_dw_ack_rcv;
-    snap_dw_dgram_rcv = meas_dw_dgram_rcv;
-    snap_dw_network_byte = meas_dw_network_byte;
-    snap_dw_payload_byte = meas_dw_payload_byte;
-    snap_nb_tx_ok = meas_nb_tx_ok;
-    snap_nb_tx_fail = meas_nb_tx_fail;
-    snap_nb_tx_requested = meas_nb_tx_requested;
-    snap_nb_tx_rejected_collision_packet = meas_nb_tx_rejected_collision_packet;
-    snap_nb_tx_rejected_collision_beacon = meas_nb_tx_rejected_collision_beacon;
-    snap_nb_tx_rejected_too_late = meas_nb_tx_rejected_too_late;
-    snap_nb_tx_rejected_too_early = meas_nb_tx_rejected_too_early;
-    snap_nb_beacon_queued = meas_nb_beacon_queued;
-    snap_nb_beacon_sent = meas_nb_beacon_sent;
-    snap_nb_beacon_rejected = meas_nb_beacon_rejected;
+    snap_dw_pull_sent = prom_dw_pull_sent;
+    snap_dw_ack_rcv = prom_dw_ack_rcv;
+    snap_dw_dgram_rcv = prom_dw_dgram_rcv;
+    snap_dw_network_byte = prom_dw_network_byte;
+    snap_dw_payload_byte = prom_dw_payload_byte;
+    snap_nb_tx_ok = prom_nb_tx_ok;
+    snap_nb_tx_fail = prom_nb_tx_fail;
+    snap_nb_tx_requested = prom_nb_tx_requested;
+    snap_nb_tx_rejected_collision_packet = prom_nb_tx_rejected_collision_packet;
+    snap_nb_tx_rejected_collision_beacon = prom_nb_tx_rejected_collision_beacon;
+    snap_nb_tx_rejected_too_late = prom_nb_tx_rejected_too_late;
+    snap_nb_tx_rejected_too_early = prom_nb_tx_rejected_too_early;
+    snap_nb_beacon_queued = prom_nb_beacon_queued;
+    snap_nb_beacon_sent = prom_nb_beacon_sent;
+    snap_nb_beacon_rejected = prom_nb_beacon_rejected;
     pthread_mutex_unlock(&mx_meas_dw);
 
     bool snap_gps_coord_valid;
@@ -3590,69 +3641,69 @@ static enum MHD_Result prometheus_metrics_handler(void *cls, struct MHD_Connecti
     buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
         "# HELP lora_packets_received_total Total number of packets received by the concentrator\n"
         "# TYPE lora_packets_received_total counter\n"
-        "lora_packets_received_total{status=\"all\"} %u\n"
-        "lora_packets_received_total{status=\"ok\"} %u\n"
-        "lora_packets_received_total{status=\"crc_bad\"} %u\n"
-        "lora_packets_received_total{status=\"no_crc\"} %u\n",
+        "lora_packets_received_total{status=\"all\"} %lu\n"
+        "lora_packets_received_total{status=\"ok\"} %lu\n"
+        "lora_packets_received_total{status=\"crc_bad\"} %lu\n"
+        "lora_packets_received_total{status=\"no_crc\"} %lu\n",
         snap_nb_rx_rcv, snap_nb_rx_ok, snap_nb_rx_bad, snap_nb_rx_nocrc);
 
     buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
         "# HELP lora_packets_forwarded_total Total number of packets forwarded to the server\n"
         "# TYPE lora_packets_forwarded_total counter\n"
-        "lora_packets_forwarded_total %u\n",
+        "lora_packets_forwarded_total %lu\n",
         snap_up_pkt_fwd);
 
     buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
         "# HELP lora_upstream_bytes_total Total number of bytes sent upstream\n"
         "# TYPE lora_upstream_bytes_total counter\n"
-        "lora_upstream_bytes_total{type=\"network\"} %u\n"
-        "lora_upstream_bytes_total{type=\"payload\"} %u\n",
+        "lora_upstream_bytes_total{type=\"network\"} %lu\n"
+        "lora_upstream_bytes_total{type=\"payload\"} %lu\n",
         snap_up_network_byte, snap_up_payload_byte);
 
     buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
         "# HELP lora_upstream_datagrams_total Total number of upstream datagrams\n"
         "# TYPE lora_upstream_datagrams_total counter\n"
-        "lora_upstream_datagrams_total{type=\"sent\"} %u\n"
-        "lora_upstream_datagrams_total{type=\"ack\"} %u\n",
+        "lora_upstream_datagrams_total{type=\"sent\"} %lu\n"
+        "lora_upstream_datagrams_total{type=\"ack\"} %lu\n",
         snap_up_dgram_sent, snap_up_ack_rcv);
 
     /* downstream metrics */
     buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
         "# HELP lora_downstream_pull_requests_total Total number of PULL_DATA requests\n"
         "# TYPE lora_downstream_pull_requests_total counter\n"
-        "lora_downstream_pull_requests_total{type=\"sent\"} %u\n"
-        "lora_downstream_pull_requests_total{type=\"ack\"} %u\n",
+        "lora_downstream_pull_requests_total{type=\"sent\"} %lu\n"
+        "lora_downstream_pull_requests_total{type=\"ack\"} %lu\n",
         snap_dw_pull_sent, snap_dw_ack_rcv);
 
     buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
         "# HELP lora_downstream_datagrams_received_total Total number of downstream datagrams received\n"
         "# TYPE lora_downstream_datagrams_received_total counter\n"
-        "lora_downstream_datagrams_received_total %u\n",
+        "lora_downstream_datagrams_received_total %lu\n",
         snap_dw_dgram_rcv);
 
     buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
         "# HELP lora_downstream_bytes_total Total number of bytes received downstream\n"
         "# TYPE lora_downstream_bytes_total counter\n"
-        "lora_downstream_bytes_total{type=\"network\"} %u\n"
-        "lora_downstream_bytes_total{type=\"payload\"} %u\n",
+        "lora_downstream_bytes_total{type=\"network\"} %lu\n"
+        "lora_downstream_bytes_total{type=\"payload\"} %lu\n",
         snap_dw_network_byte, snap_dw_payload_byte);
 
     /* transmission metrics */
     buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
         "# HELP lora_transmit_total Total number of transmission events\n"
         "# TYPE lora_transmit_total counter\n"
-        "lora_transmit_total{status=\"ok\"} %u\n"
-        "lora_transmit_total{status=\"fail\"} %u\n"
-        "lora_transmit_total{status=\"requested\"} %u\n",
+        "lora_transmit_total{status=\"ok\"} %lu\n"
+        "lora_transmit_total{status=\"fail\"} %lu\n"
+        "lora_transmit_total{status=\"requested\"} %lu\n",
         snap_nb_tx_ok, snap_nb_tx_fail, snap_nb_tx_requested);
 
     buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
         "# HELP lora_transmit_rejected_total Total number of rejected transmissions by reason\n"
         "# TYPE lora_transmit_rejected_total counter\n"
-        "lora_transmit_rejected_total{reason=\"collision_packet\"} %u\n"
-        "lora_transmit_rejected_total{reason=\"collision_beacon\"} %u\n"
-        "lora_transmit_rejected_total{reason=\"too_late\"} %u\n"
-        "lora_transmit_rejected_total{reason=\"too_early\"} %u\n",
+        "lora_transmit_rejected_total{reason=\"collision_packet\"} %lu\n"
+        "lora_transmit_rejected_total{reason=\"collision_beacon\"} %lu\n"
+        "lora_transmit_rejected_total{reason=\"too_late\"} %lu\n"
+        "lora_transmit_rejected_total{reason=\"too_early\"} %lu\n",
         snap_nb_tx_rejected_collision_packet, snap_nb_tx_rejected_collision_beacon,
         snap_nb_tx_rejected_too_late, snap_nb_tx_rejected_too_early);
 
@@ -3660,9 +3711,9 @@ static enum MHD_Result prometheus_metrics_handler(void *cls, struct MHD_Connecti
     buf_idx += snprintf(metrics_buffer + buf_idx, sizeof(metrics_buffer) - buf_idx,
         "# HELP lora_beacon_total Total number of beacon events\n"
         "# TYPE lora_beacon_total counter\n"
-        "lora_beacon_total{status=\"queued\"} %u\n"
-        "lora_beacon_total{status=\"sent\"} %u\n"
-        "lora_beacon_total{status=\"rejected\"} %u\n",
+        "lora_beacon_total{status=\"queued\"} %lu\n"
+        "lora_beacon_total{status=\"sent\"} %lu\n"
+        "lora_beacon_total{status=\"rejected\"} %lu\n",
         snap_nb_beacon_queued, snap_nb_beacon_sent, snap_nb_beacon_rejected);
 
     /* hardware status */
